@@ -45,7 +45,7 @@ async def analyze_stream(req: AIAnalyzeRequest):
         【回测上下文】
         * 标的片段：{req.symbol}  ({req.start_date} ~ {req.end_date})
         * 选用流派：{req.strategy_name}
-        * 配置面具：底仓配置 {p.get('base_position_ratio', 0.5)*100}%, 网格区间 [{p.get('lower_bound')} ~ {p.get('upper_bound')}], 切分模式: {p.get('grid_type','geometric')}, 间距: {p.get('grid_step_pct',0.05)*100}%, 每笔消耗: {p.get('funds_per_grid')}
+        * 配置面具：底仓配置 {p.get('base_position_ratio', 0.5)*100}%, 网格区间 [{p.get('lower_bound')} ~ {p.get('upper_bound')}], 切分模式: {p.get('grid_type','geometric')}, 间距: {p.get('grid_step_pct',5)}%, 每笔消耗: {p.get('funds_per_grid')}
         * 战损通报：累计收益率 {m.get('total_return', 0)*100:.2f}%, 极致痛点(满回撤) {m.get('max_drawdown', 0)*100:.2f}%, 发生割肉/盈利等累计交易单 {m.get('total_trades', 0)} 宗, 胜率约为 {m.get('win_rate',0)*100:.2f}%
         
         【内部思考要求】

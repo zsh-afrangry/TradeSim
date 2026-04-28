@@ -1,116 +1,153 @@
 from app.strategy.base import BaseStrategy
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import logging
 
 logger = logging.getLogger(__name__)
 
-# 网格节点的两种状态
-IDLE = "IDLE"           # 空闲：可以执行买入
-OCCUPIED = "OCCUPIED"   # 占用：已持有仓位，等待卖出释放
 
-
+@dataclass
 class GridNode:
     """
-    代表一条具体的网格线，持有其价格锚点与当前状态。
-    买入后变为 OCCUPIED，只有触发卖出平仓后才重置回 IDLE。
-    """
-    def __init__(self, price: float):
-        self.price = price
-        self.status: str = IDLE
+    A concrete grid buy level.
 
-    def occupy(self):
-        """买入时调用，将该格标记为占用"""
-        self.status = OCCUPIED
+    The node is occupied only after a real GRID_BUY succeeds. Base position is
+    tracked only at account level and never marks grid nodes as occupied.
+    """
+    price: float
+    volume: int = 0
+    buy_price: float = 0.0
+    buy_amount: float = 0.0
+    buy_commission: float = 0.0
+    buy_slippage_cost: float = 0.0
+
+    def occupy(self, trade: Dict[str, Any]):
+        """Persist the real position opened by a GRID_BUY at this node."""
+        self.volume = int(trade["volume"])
+        self.buy_price = float(trade["price"])
+        self.buy_amount = float(trade["amount"])
+        self.buy_commission = float(trade["commission"])
+        self.buy_slippage_cost = float(trade["slippage_cost"])
 
     def release(self):
-        """卖出时调用，将该格重置为空闲"""
-        self.status = IDLE
+        """Clear this node after its paired GRID_SELL completes."""
+        self.volume = 0
+        self.buy_price = 0.0
+        self.buy_amount = 0.0
+        self.buy_commission = 0.0
+        self.buy_slippage_cost = 0.0
 
     @property
     def is_idle(self) -> bool:
-        return self.status == IDLE
+        return self.volume <= 0
 
     @property
     def is_occupied(self) -> bool:
-        return self.status == OCCUPIED
+        return self.volume > 0
 
     def __repr__(self):
-        return f"GridNode(price={self.price:.3f}, status={self.status})"
+        return f"GridNode(price={self.price:.3f}, volume={self.volume})"
 
 
 class GridTradingStrategy(BaseStrategy):
     """
-    有状态（Stateful）网格交易策略实现。
+    Stateful daily-close grid strategy.
 
-    核心规则（来自需求文档）：
-    - 每一个网格节点都有独立的状态机（IDLE / OCCUPIED）。
-    - 价格向下穿越某格时，仅当该格处于 IDLE 状态时才触发买入，买入后该格变为 OCCUPIED。
-    - 价格向上穿越某格的上方格（即对应的卖出格）时，若下方买入格处于 OCCUPIED，
-      则触发卖出并将买入格重置为 IDLE。
-    - 同一格在没有完成"买入→卖出"完整配对前，绝不会重复买入，
-      彻底杜绝同一价位区间来回震荡导致的异常仓位累积。
+    Rules:
+    - Only close-to-close grid crossings trigger trades.
+    - Base position is independent from grid positions.
+    - A grid node can be sold only if it was previously opened by GRID_BUY.
     """
 
     def __init__(self, df, params, initial_capital, commission_rate, slippage):
         super().__init__(df, params, initial_capital, commission_rate, slippage)
 
-        # 提取专属参数并进行默认降级处理
-        self.lower_bound = params.get('lower_bound', 20.0)
-        self.upper_bound = params.get('upper_bound', 30.0)
-        self.grid_step_pct = params.get('grid_step_pct', 0.05)
-        self.grid_type = params.get('grid_type', 'geometric')
-        self.grid_count = params.get('grid_count', 20)
-        self.base_position_ratio = params.get('base_position_ratio', 0.5)
-        self.trade_mode = params.get('trade_mode', 'amount')
-        self.funds_per_grid = params.get('funds_per_grid', 10000.0)
+        self.lower_bound = float(params.get("lower_bound", 20.0))
+        self.upper_bound = float(params.get("upper_bound", 30.0))
+        self.grid_step_pct = float(params.get("grid_step_pct", 5.0))
+        self.grid_type = params.get("grid_type", "geometric")
+        self.grid_count = int(params.get("grid_count", 20))
+        self.base_position_ratio = float(params.get("base_position_ratio", 0.5))
+        self.trade_mode = params.get("trade_mode", "amount")
+        self.funds_per_grid = float(params.get("funds_per_grid", 10000.0))
 
-        # 构建有状态的网格线节点列表（核心升级：从 float list → GridNode list）
+        self._validate_params()
+        self.grid_step_ratio = self._percent_to_ratio(self.grid_step_pct)
+
+        self.completed_cycles = 0
+        self.winning_cycles = 0
+        self.realized_grid_profit = 0.0
+
         self.grid_nodes: List[GridNode] = self._build_grid_nodes()
-
-        # 记录上一根 K 线收盘价所在的网格索引（-1 表示尚未初始化）
         self.last_grid_idx = -1
 
-    # ──────────────────────────────────────────────────
-    # 网格构建
-    # ──────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # Parameter and grid setup
+    # ------------------------------------------------------------------
+
+    def _validate_params(self):
+        if self.initial_capital <= 0:
+            raise ValueError("initial_capital 必须大于 0")
+        if self.commission_rate < 0:
+            raise ValueError("commission_rate 不能为负")
+        if self.slippage < 0:
+            raise ValueError("slippage 不能为负")
+        if self.lower_bound <= 0:
+            raise ValueError("lower_bound 必须大于 0")
+        if self.upper_bound <= self.lower_bound:
+            raise ValueError("upper_bound 必须大于 lower_bound")
+        if self.grid_step_pct <= 0:
+            raise ValueError("grid_step_pct 必须大于 0，例如 5 表示 5%")
+        if self.grid_type not in {"geometric", "arithmetic"}:
+            raise ValueError("grid_type 必须是 geometric 或 arithmetic")
+        if self.grid_type == "arithmetic" and self.grid_count <= 0:
+            raise ValueError("grid_count 必须大于 0")
+        if not 0 <= self.base_position_ratio <= 1:
+            raise ValueError("base_position_ratio 必须在 0 到 1 之间")
+        if self.trade_mode not in {"amount", "volume"}:
+            raise ValueError("trade_mode 必须是 amount 或 volume")
+        if self.funds_per_grid <= 0:
+            raise ValueError("funds_per_grid 必须大于 0")
+
+    def _percent_to_ratio(self, value: float) -> float:
+        """Convert API/user percent input to calculation ratio. 5 means 5%."""
+        ratio = float(value) / 100
+        if ratio <= 0:
+            raise ValueError("grid_step_pct 必须大于 0，例如 5 表示 5%")
+        return ratio
 
     def _build_grid_nodes(self) -> List[GridNode]:
-        """按照价格区间和划分模式构建 GridNode 状态节点列表"""
         prices = []
-        if self.grid_type == 'arithmetic':
-            count = max(1, self.grid_count)
-            step = (self.upper_bound - self.lower_bound) / count
-            prices = [self.lower_bound + i * step for i in range(count + 1)]
+        if self.grid_type == "arithmetic":
+            step = (self.upper_bound - self.lower_bound) / self.grid_count
+            prices = [self.lower_bound + i * step for i in range(self.grid_count + 1)]
         else:
-            # 等比切分（geometric）
             current = self.lower_bound
-            while current <= self.upper_bound * 1.0001:   # 容忍浮点误差
+            while current <= self.upper_bound * 1.0001:
                 prices.append(current)
-                current *= (1 + self.grid_step_pct)
+                current *= (1 + self.grid_step_ratio)
 
-        return [GridNode(p) for p in prices]
+        return [GridNode(price) for price in prices]
 
     def _grid_prices(self) -> List[float]:
-        """辅助方法：快速取出所有节点的价格列表（用于索引定位）"""
         return [node.price for node in self.grid_nodes]
 
     def _find_nearest_grid_idx(self, price: float) -> int:
         """
-        找到当前价格"踩在"哪一格区间内。
-        返回价格刚好 >= 的最右侧网格线索引（即价格所处区间的下边界之格）。
+        Return the rightmost grid line index at or below price.
+        -1 means price is below the lower bound.
         """
         for i in range(len(self.grid_nodes) - 1, -1, -1):
             if price >= self.grid_nodes[i].price:
                 return i
         return -1
 
-    # ──────────────────────────────────────────────────
-    # 回测主循环
-    # ──────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # Backtest lifecycle
+    # ------------------------------------------------------------------
 
     def execute(self) -> Dict[str, Any]:
-        """覆盖并执行基类的回测生命周期主循环"""
         if self.df is None or self.df.is_empty():
             logger.warning("历史数据不足或为空，网格回测强制跳过产出空结果。")
             return self._build_empty_response()
@@ -123,43 +160,18 @@ class GridTradingStrategy(BaseStrategy):
             open_price = row["开盘"]
             close_price = row["收盘"]
 
-            # ── 第一天：建立底仓，初始化上一格索引 ──────────────
-            if self.last_grid_idx == -1 and self.position == 0:
+            if self.last_grid_idx == -1:
                 self._initialize_base_position(date_str, open_price)
-                self.last_grid_idx = self._find_nearest_grid_idx(open_price)
-                # 底仓对应的格全部标记为占用
-                for i in range(self.last_grid_idx + 1):
-                    self.grid_nodes[i].occupy()
+                self.last_grid_idx = self._find_nearest_grid_idx(close_price)
                 self._record_equity_snapshot(date_str, close_price)
                 continue
 
-            # ── 后续每天：检测收盘价穿格情况，触发有状态的买卖逻辑 ──
             current_grid_idx = self._find_nearest_grid_idx(close_price)
 
             if current_grid_idx > self.last_grid_idx:
-                # 价格向上穿越了若干格：逐格触发卖出（必须该买入格处于 OCCUPIED 才能卖）
-                for step in range(current_grid_idx - self.last_grid_idx):
-                    sell_at_idx = self.last_grid_idx + step + 1
-                    buy_at_idx  = self.last_grid_idx + step        # 买入格 = 卖出格的下方一格
-                    if 0 <= buy_at_idx < len(self.grid_nodes):
-                        buy_node = self.grid_nodes[buy_at_idx]
-                        if buy_node.is_occupied:
-                            grid_price = self.grid_nodes[sell_at_idx].price
-                            sold = self._sell(date_str, grid_price, "GRID_SELL")
-                            if sold:
-                                buy_node.release()   # 卖出成功 → 释放对应买入格
-
+                self._handle_upward_cross(date_str, current_grid_idx)
             elif current_grid_idx < self.last_grid_idx:
-                # 价格向下穿越了若干格：逐格触发买入（必须该格处于 IDLE 才能买）
-                for step in range(self.last_grid_idx - current_grid_idx):
-                    buy_at_idx = self.last_grid_idx - step - 1
-                    if 0 <= buy_at_idx < len(self.grid_nodes):
-                        buy_node = self.grid_nodes[buy_at_idx]
-                        if buy_node.is_idle:
-                            grid_price = buy_node.price
-                            bought = self._buy(date_str, grid_price, "GRID_BUY")
-                            if bought:
-                                buy_node.occupy()    # 买入成功 → 封锁该格，等待卖出释放
+                self._handle_downward_cross(date_str, current_grid_idx)
 
             self.last_grid_idx = current_grid_idx
             self._record_equity_snapshot(date_str, close_price)
@@ -170,82 +182,144 @@ class GridTradingStrategy(BaseStrategy):
             "execution_records": self.trade_logs
         }
 
-    # ──────────────────────────────────────────────────
-    # 交易执行
-    # ──────────────────────────────────────────────────
+    def _handle_downward_cross(self, date: str, current_grid_idx: int):
+        for step in range(self.last_grid_idx - current_grid_idx):
+            buy_at_idx = self.last_grid_idx - step - 1
+            if 0 <= buy_at_idx < len(self.grid_nodes):
+                buy_node = self.grid_nodes[buy_at_idx]
+                if buy_node.is_idle:
+                    bought = self._buy(date, buy_node.price, "GRID_BUY")
+                    if bought:
+                        buy_node.occupy(bought)
+
+    def _handle_upward_cross(self, date: str, current_grid_idx: int):
+        for step in range(current_grid_idx - self.last_grid_idx):
+            sell_at_idx = self.last_grid_idx + step + 1
+            buy_at_idx = self.last_grid_idx + step
+            if 0 <= buy_at_idx < len(self.grid_nodes) and 0 <= sell_at_idx < len(self.grid_nodes):
+                buy_node = self.grid_nodes[buy_at_idx]
+                if buy_node.is_occupied:
+                    sold = self._sell(date, self.grid_nodes[sell_at_idx].price, "GRID_SELL", expected_volume=buy_node.volume)
+                    if sold:
+                        cycle_profit = sold["amount"] - buy_node.buy_amount
+                        self.completed_cycles += 1
+                        self.realized_grid_profit += cycle_profit
+                        if cycle_profit > 0:
+                            self.winning_cycles += 1
+                        buy_node.release()
+
+    # ------------------------------------------------------------------
+    # Execution helpers
+    # ------------------------------------------------------------------
 
     def _initialize_base_position(self, date: str, price: float):
-        """首日启动：购买指定占比份额的底仓筹码"""
         target_cost = self.initial_capital * self.base_position_ratio
         shares_to_buy = int(target_cost / (price + self.slippage) / 100) * 100
         if shares_to_buy > 0:
             self._buy(date, price, "BASE_OPEN", expected_volume=shares_to_buy)
 
-    def _buy(self, date: str, trigger_price: float, action_type: str, expected_volume: int = None) -> bool:
-        """
-        触发买单、计算磨损、检查余额并沉淀历史。
-        返回值：True = 买入成功；False = 余额不足或手数为0，买入失败
-        """
+    def _buy(self, date: str, trigger_price: float, action_type: str, expected_volume: int = None) -> Optional[Dict[str, Any]]:
         exec_price = trigger_price + self.slippage
 
         if expected_volume is None:
-            if self.trade_mode == 'amount':
+            if self.trade_mode == "amount":
                 volume = int(self.funds_per_grid / exec_price / 100) * 100
             else:
                 volume = int(self.funds_per_grid / 100) * 100
         else:
-            volume = expected_volume
+            volume = int(expected_volume)
 
         if volume <= 0:
-            return False
+            return None
 
         cost = exec_price * volume
         commission = cost * self.commission_rate
         total_cost = cost + commission
+        slippage_cost = self.slippage * volume
 
-        if self.cash >= total_cost:
-            self.cash -= total_cost
-            self.position += volume
-            self._record_trade_log(date, action_type, exec_price, volume, total_cost, commission, self.slippage * volume)
-            return True
+        if self.cash < total_cost:
+            return None
 
-        return False
+        self.cash -= total_cost
+        self.position += volume
+        trade = {
+            "price": exec_price,
+            "volume": volume,
+            "amount": total_cost,
+            "commission": commission,
+            "slippage_cost": slippage_cost
+        }
+        self._record_trade_log(date, action_type, exec_price, volume, total_cost, commission, slippage_cost)
+        return trade
 
-    def _sell(self, date: str, trigger_price: float, action_type: str) -> bool:
-        """
-        触发卖单、检查持仓、计征印花及佣金并结算。
-        返回值：True = 卖出成功；False = 持仓不足，卖出失败
-        """
+    def _sell(self, date: str, trigger_price: float, action_type: str, expected_volume: int = None) -> Optional[Dict[str, Any]]:
         exec_price = max(0.01, trigger_price - self.slippage)
 
-        if self.trade_mode == 'amount':
+        if expected_volume is not None:
+            volume = int(expected_volume)
+            if self.position < volume:
+                return None
+        elif self.trade_mode == "amount":
             volume = int(self.funds_per_grid / exec_price / 100) * 100
+            volume = min(volume, self.position)
         else:
             volume = int(self.funds_per_grid / 100) * 100
+            volume = min(volume, self.position)
 
-        volume = min(volume, self.position)
         if volume <= 0:
-            return False
+            return None
 
         revenue = exec_price * volume
         commission = revenue * self.commission_rate
         net_revenue = revenue - commission
+        slippage_cost = self.slippage * volume
 
         self.cash += net_revenue
         self.position -= volume
-        self._record_trade_log(date, action_type, exec_price, volume, net_revenue, commission, self.slippage * volume)
-        return True
+        trade = {
+            "price": exec_price,
+            "volume": volume,
+            "amount": net_revenue,
+            "commission": commission,
+            "slippage_cost": slippage_cost
+        }
+        self._record_trade_log(date, action_type, exec_price, volume, net_revenue, commission, slippage_cost)
+        return trade
 
-    # ──────────────────────────────────────────────────
-    # 兜底
-    # ──────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # Metrics and fallback
+    # ------------------------------------------------------------------
+
+    def _calculate_metrics(self) -> Dict[str, Any]:
+        final_net_value = self.equity_curve[-1]["net_value"] if self.equity_curve else self.initial_capital
+        total_return = (final_net_value - self.initial_capital) / self.initial_capital
+
+        max_drawdown = 0.0
+        if self.equity_curve:
+            max_drawdown = max(record["drawdown"] for record in self.equity_curve)
+
+        grid_trades = [
+            log for log in self.trade_logs
+            if log["action"] in {"GRID_BUY", "GRID_SELL"}
+        ]
+        win_rate = self.winning_cycles / self.completed_cycles if self.completed_cycles > 0 else 0.0
+
+        return {
+            "total_return": round(total_return, 4),
+            "annualized_return": 0.0,
+            "max_drawdown": round(max_drawdown, 4),
+            "win_rate": round(win_rate, 4),
+            "total_trades": len(grid_trades)
+        }
 
     def _build_empty_response(self) -> Dict[str, Any]:
-        """当遇到极端停牌日无数据时返回兜底空字典"""
         return {
             "metrics": {
-                "total_return": 0.0, "annualized_return": 0.0,
-                "max_drawdown": 0.0, "win_rate": 0.0, "total_trades": 0
+                "total_return": 0.0,
+                "annualized_return": 0.0,
+                "max_drawdown": 0.0,
+                "win_rate": 0.0,
+                "total_trades": 0
             },
             "equity_curve": [],
             "execution_records": []

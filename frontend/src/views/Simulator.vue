@@ -29,7 +29,7 @@ const form = reactive({
     lower_bound: 10.0,
     upper_bound: 50.0,
     grid_type: 'geometric',
-    grid_step_pct: 0.05,
+    grid_step_pct: 5,
     grid_count: 20,
     base_position_ratio: 0.5,
     trade_mode: 'amount',
@@ -50,7 +50,7 @@ const isAmountTooSmall = computed(() => {
 const estimatedGeometricGrids = computed(() => {
     const lb = form.strategy_params.lower_bound
     const ub = form.strategy_params.upper_bound
-    const pct = form.strategy_params.grid_step_pct
+    const pct = form.strategy_params.grid_step_pct / 100
     if (lb > 0 && ub > lb && pct > 0) {
         const ratio = ub / lb;
         const count = Math.log(ratio) / Math.log(1 + pct);
@@ -109,9 +109,10 @@ const renderChart = () => {
       }
   } else {
       let currentGrid = form.strategy_params.lower_bound
+      const gridStepRatio = form.strategy_params.grid_step_pct / 100
       while (currentGrid <= form.strategy_params.upper_bound) {
           dynamicGrids.push({ yAxis: currentGrid, label: { formatter: `{c}` } })
-          currentGrid *= (1 + form.strategy_params.grid_step_pct)
+          currentGrid *= (1 + gridStepRatio)
       }
   }
   
@@ -460,8 +461,11 @@ const saveRecord = async () => {
           <el-form-item label="时间粒度">
             <el-select v-model="form.data_frequency" style="width: 100%">
               <el-option label="日线 (极速回放)" value="daily" />
+              <!-- 细时间粒度暂不开放，当前网格算法先只按日线收盘价验证。 -->
+              <!--
               <el-option label="5分钟线 (精细模拟)" value="5min" />
               <el-option label="1分钟线 (极限穿透)" value="1min" />
+              -->
             </el-select>
           </el-form-item>
           <el-form-item label="时间范围">
@@ -530,7 +534,16 @@ const saveRecord = async () => {
           </el-form-item>
           
           <el-form-item label="网格间距(%)" v-if="form.strategy_params.grid_type === 'geometric'">
-            <el-input-number v-model="form.strategy_params.grid_step_pct" :step="0.01" :precision="2" style="width: 100%" />
+            <div class="percent-input">
+              <el-input-number
+                v-model="form.strategy_params.grid_step_pct"
+                :step="0.5"
+                :precision="2"
+                :min="0.01"
+                style="width: 100%"
+              />
+              <span class="percent-suffix">%</span>
+            </div>
             <div style="color: #909399; font-size: 11px; line-height: 1.2; margin-top: 4px; width: 100%;">
               (预估区间将被切割为约 {{ estimatedGeometricGrids }} 格)
             </div>
@@ -785,5 +798,24 @@ html, body {
 .card-header {
   font-weight: bold;
   color: #303133;
+}
+
+.percent-input {
+  position: relative;
+  width: 100%;
+}
+
+.percent-input .el-input__inner {
+  padding-right: 26px;
+}
+
+.percent-suffix {
+  position: absolute;
+  right: 42px;
+  top: 50%;
+  color: #606266;
+  font-size: 13px;
+  pointer-events: none;
+  transform: translateY(-50%);
 }
 </style>

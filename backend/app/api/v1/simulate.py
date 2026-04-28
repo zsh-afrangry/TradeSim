@@ -29,16 +29,19 @@ async def run_simulation(request: SimulationRequest):
 
     # 2. 策略路由：基于 strategy_name 进行动态分发
     # （未来可以改造成工厂模式或者注册映射机制，这里暂举一例网格）
-    if request.strategy_name == "GRID_TRADING":
-        engine = GridTradingStrategy(
-            df=df_pl,
-            params=request.strategy_params,
-            initial_capital=request.initial_capital,
-            commission_rate=request.commission_rate,
-            slippage=request.slippage
-        )
-    else:
-        raise HTTPException(status_code=400, detail=f"未找到该策略类 {request.strategy_name}, 敬请期待")
+    try:
+        if request.strategy_name == "GRID_TRADING":
+            engine = GridTradingStrategy(
+                df=df_pl,
+                params=request.strategy_params,
+                initial_capital=request.initial_capital,
+                commission_rate=request.commission_rate,
+                slippage=request.slippage
+            )
+        else:
+            raise HTTPException(status_code=400, detail=f"未找到该策略类 {request.strategy_name}, 敬请期待")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     # 3. 执行核心循环计算
     try:

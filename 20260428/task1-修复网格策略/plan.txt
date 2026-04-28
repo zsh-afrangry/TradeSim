@@ -1,0 +1,86 @@
+# 修复网格策略 Plan
+
+## Summary
+
+本阶段只修复“网格回测”的日线核心算法，不开发年线策略，不引入盘中最高/最低触网。采用确定口径：
+
+- 日线触发模型：只按相邻交易日“收盘价跨格”触发。
+- 底仓规则：底仓独立于网格仓，只影响初始现金和账户持仓；`GRID_SELL` 只卖真实 `GRID_BUY` 买入的仓位。
+- API 响应结构不变，继续返回 `metrics / equity_curve / execution_records`。
+
+## Implementation Changes
+
+### 1. 重构网格节点和交易状态
+
+- 将 `GridNode` 从简单 `IDLE / OCCUPIED` 改为真实网格持仓容器，至少记录：
+  - `price`
+  - `volume`
+  - `buy_price`
+  - `buy_amount`
+  - `buy_commission`
+  - `buy_slippage_cost`
+- `GridNode.is_idle` 由 `volume <= 0` 判断。
+- 只有真实 `GRID_BUY` 成功后，节点才变为占用。
+- 首日初始化不得再把当前价格以下所有节点标记为占用。
+
+### 2. 修复买卖触发规则
+
+- 初始化：
+  - 首日按 `base_position_ratio` 建立 `BASE_OPEN`。
+  - 设置 `last_grid_idx = 当前收盘价所在网格索引`。
+  - 记录第一条资金曲线快照。
+- 下跌跨格：
+  - 从旧索引逐格向下遍历。
+  - 对每个被下穿的买入格，如果节点为空，则按该节点价格执行 `GRID_BUY`。
+  - 买入成功后，把成交股数和成本写入该节点。
+- 上涨跨格：
+  - 从旧索引逐格向上遍历。
+  - 卖出对象是“卖出格下方相邻买入格”的节点。
+  - 只有该节点存在真实未卖出的网格仓，才执行 `GRID_SELL`。
+  - 卖出股数必须使用该节点保存的 `volume`，不能重新按 `funds_per_grid` 计算。
+  - 卖出成功后释放该节点。
+
+### 3. 修正指标口径
+
+- `total_return`：继续按最终账户净值相对初始本金计算。
+- `max_drawdown`：继续按每日收盘后账户净值快照计算。
+- `total_trades`：改为网格买卖流水数，只统计 `GRID_BUY / GRID_SELL`，不含 `BASE_OPEN`。
+- `win_rate`：只按已完成的网格配对计算。
+
+### 4. 补齐参数校验
+
+- 在 `GridTradingStrategy.__init__` 或专用校验方法中抛出 `ValueError`，由 `/api/v1/simulate/run` 转为 HTTP 400。
+- 校验规则：
+  - `lower_bound > 0`
+  - `upper_bound > lower_bound`
+  - `grid_step_pct > 0`
+  - 等差模式下 `grid_count > 0`
+  - `initial_capital > 0`
+  - `commission_rate >= 0`
+  - `slippage >= 0`
+  - `0 <= base_position_ratio <= 1`
+  - `trade_mode in {"amount", "volume"}`
+  - `funds_per_grid > 0`
+
+## Test Plan
+
+- 扩展并运行 `backend/tests/grid_strategy_cases.py`：
+  - 百分比契约：`grid_step_pct=5` 生成 `10.0, 10.5, 11.025...`
+  - 基础闭环：`10 -> 9.5 -> 10` 买低卖高，收益 `50` 元。
+  - 多格下跌：`10 -> 9` 应逐格买入 `9.5` 和 `9.0`。
+  - 多格上涨：已有低位仓时，应逐格卖出并释放对应节点。
+  - 底仓独立：`base_position_ratio=0.5` 不应占用网格节点，不应影响网格胜率。
+  - 手续费/滑点：净利润应扣除买卖佣金和滑点成本。
+  - 资金不足：买入失败时不得占用节点。
+- 验证命令：
+  - `conda run -n tradesim python backend\tests\grid_strategy_cases.py`
+  - `python -m compileall backend\app`
+  - `npm.cmd run build`
+
+## Assumptions
+
+- 当前阶段只保证日线收盘价跨格模型正确。
+- 不使用 `最高 / 最低` 进行盘中触网模拟。
+- 不改变前端四个指标卡片，也不改变后端响应字段。
+- 不改变收藏记录表结构。
+- 不修复年线策略相关页面和路由。

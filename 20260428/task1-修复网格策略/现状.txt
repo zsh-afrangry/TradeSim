@@ -1,0 +1,284 @@
+TradeSim 网格策略当前现状记录
+日期：2026-04-28
+
+一、当前检查范围
+
+本轮检查只关注“网格回测”核心链路，尤其是：
+
+1. 前端参数是否按用户直觉传递。
+2. /api/v1/simulate/run 接口中的 GRID_TRADING 分发是否清晰。
+3. GridTradingStrategy 的网格坐标、买卖触发、持仓状态、指标统计是否符合“跌一格买、涨一格卖、赚取网格差价”的标准网格逻辑。
+
+本轮不开发“年线策略”。
+
+
+二、已完成的参数层修正
+
+1. 时间粒度暂时只开放“日线”
+
+文件：
+frontend/src/views/Simulator.vue
+
+现状：
+前端默认 data_frequency = daily。
+5 分钟线、1 分钟线选项已注释，暂不开放给用户使用。
+
+原因：
+当前策略只按相邻 K 线收盘价判断跨格，尚未验证细粒度行情下的盘中触发逻辑。先固定日线可以缩小验证范围。
+
+2. 网格间距改为真实百分数输入
+
+文件：
+frontend/src/views/Simulator.vue
+backend/app/strategy/specific/grid_trade.py
+backend/app/schemas/simulate.py
+backend/app/api/v1/ai.py
+
+现状：
+前端“网格间距(%)”现在输入 5 表示 5%，并显示百分号。
+后端也同步成 grid_step_pct = 5.0 表示 5%，策略内部转换为 0.05 参与等比网格计算。
+
+已验证：
+测试脚本中 10.0 起步、grid_step_pct = 5.0 时，等比网格为：
+10.0, 10.5, 11.025 ...
+该部分通过。
+
+
+三、已确认的核心算法问题
+
+问题 1：标准网格闭环没有发生
+
+测试用例：
+网格下限：8
+网格上限：12
+等差网格数量：8
+即每 0.5 元一格
+每格交易：100 股
+手续费：0
+滑点：0
+底仓比例：0
+价格序列：10.0 -> 9.5 -> 10.0
+
+理论预期：
+d2 价格从 10.0 跌到 9.5，买入 100 股。
+d3 价格从 9.5 涨回 10.0，卖出 100 股。
+毛利润：
+(10.0 - 9.5) * 100 = 50 元。
+若初始资金为 10000，则总收益率应为 0.005，即 0.5%。
+
+当前实际：
+没有产生任何 GRID_BUY / GRID_SELL。
+execution_records = []
+total_trades = 0
+total_return = 0
+
+直接原因：
+GridTradingStrategy 首日初始化时，会把当前价格以下的所有网格节点标记为 OCCUPIED。
+即使 base_position_ratio = 0、实际没有买入任何底仓，低于当前价格的网格也会被视为“已占用”。
+所以后续价格从 10.0 跌到 9.5 时，9.5 对应网格不是 IDLE，买入被跳过。
+
+
+问题 2：底仓和网格交易状态混在一起
+
+测试用例：
+同样价格序列：10.0 -> 9.5 -> 10.0
+底仓比例：50%
+
+当前实际：
+d1 BASE_OPEN 以 10.0 买入 500 股。
+d3 GRID_SELL 以 10.0 卖出 100 股。
+total_return = 0
+
+问题：
+这不是标准网格逻辑里的“9.5 买入、10.0 卖出”。
+当前卖出的其实是首日 10.0 建立的底仓，回到 10.0 卖出并没有产生网格差价利润。
+
+结论：
+当前 GridNode 的 OCCUPIED 状态不能区分：
+1. 真实由某个网格买入形成的仓位。
+2. 初始底仓。
+3. 仅仅因为初始化规则被标记出来的虚假占用。
+
+
+问题 3：日线回测只看收盘价，不看最高/最低
+
+测试用例：
+d1 close = 10.0
+d2 low = 9.5, high = 10.5, close = 10.0
+
+理论分歧：
+如果使用日内高低价模拟触网，d2 内部可能发生买入/卖出。
+如果严格使用收盘价跨格，则不会发生交易。
+
+当前实际：
+策略只读取“日期、开盘、收盘”，没有使用“最高、最低”。
+因此只要收盘仍是 10.0，就不会触发任何网格交易。
+
+结论：
+当前算法的真实定义是“收盘价跨格模型”，不是“盘中触网模型”。
+如果继续使用日线，必须明确选择：
+1. 保守模型：只按收盘价触发。
+2. 近似盘中模型：按最高/最低判断是否触网，但需要处理同一天先涨后跌/先跌后涨的路径假设。
+
+
+问题 4：胜率统计不可靠
+
+文件：
+backend/app/strategy/base.py
+
+当前逻辑：
+遍历 trade_logs，只要某条 SELL 的价格高于上一条流水价格，就计为胜。
+completed_trades 使用 total_trades / 2 粗略估算。
+
+问题：
+1. 没有真实配对 GRID_BUY 和 GRID_SELL。
+2. BASE_OPEN 会混入交易流水，影响胜率。
+3. 未完成的买入也会影响分母。
+4. 多格穿越、连续买入、连续卖出时，上一条流水不一定是对应买入。
+
+例子：
+价格 10.0 -> 10.5 -> 10.0，底仓 50% 时：
+BASE_OPEN 10.0
+GRID_SELL 10.5
+GRID_BUY 10.0
+当前 win_rate = 0.6667
+这个结果不能解释为真实网格胜率。
+
+建议：
+胜率应基于已完成的网格配对交易计算。
+每次 GRID_BUY 应记录买入价、股数、成本、所属网格。
+对应 GRID_SELL 完成后，根据实际已实现盈亏判断胜负。
+
+
+问题 5：交易频次定义不清
+
+当前 total_trades = len(trade_logs)。
+
+问题：
+该值包含 BASE_OPEN。
+它表示“流水条数”，不是“网格套利轮次”。
+
+建议：
+可以拆成：
+1. total_orders：总委托/成交流水数。
+2. grid_orders：网格买卖流水数。
+3. completed_cycles：完成的买入-卖出网格轮次数。
+
+前端当前显示“交易频次”，如果继续使用 total_trades，用户可能误解为完成套利次数。
+
+
+问题 6：总收益率和最大回撤基本可用，但口径需要明确
+
+总收益率：
+当前按最终账户净值相对初始资金计算。
+包含现金 + 当前持仓市值。
+这个口径基本合理。
+
+最大回撤：
+当前按每根 K 线收盘后的账户净值快照计算。
+这个口径也基本合理。
+
+注意：
+它不是盘中最大回撤。
+如果未来使用最高/最低模拟盘中触网，回撤口径也要同步明确。
+
+
+问题 7：后端参数校验仍然不足
+
+当前已补：
+grid_step_pct <= 0 时会抛出 ValueError，并由 /api/v1/simulate/run 转为 400。
+
+仍缺少：
+1. lower_bound 必须大于 0。
+2. upper_bound 必须大于 lower_bound。
+3. grid_count 必须为正整数。
+4. initial_capital 必须大于 0。
+5. commission_rate 不能为负。
+6. slippage 不能为负。
+7. trade_mode 应限制为 amount 或 volume。
+8. base_position_ratio 应限制在 0 到 1。
+9. fixed volume 模式下 funds_per_grid 实际表示股数，命名容易误导。
+
+
+四、已新增的验证脚本
+
+文件：
+backend/tests/grid_strategy_cases.py
+
+运行方式：
+conda run -n tradesim python backend\tests\grid_strategy_cases.py
+
+当前结果：
+PASS test_geometric_percent_contract
+FAIL test_basic_grid_cycle_should_buy_low_and_sell_high: trade count for one completed grid cycle: expected 2, got 0
+
+解释：
+百分比网格坐标已经符合预期。
+标准网格闭环仍失败，说明核心状态机需要修复。
+
+
+五、建议的修复顺序
+
+第一步：明确日线网格触发模型
+
+推荐先采用“收盘价跨格模型”，因为当前代码已经按这个方向实现，修复范围较小。
+先不处理同一天最高/最低触网问题。
+
+第二步：重写 GridNode 状态含义
+
+GridNode 不应只保存 IDLE / OCCUPIED。
+至少需要保存：
+1. price：网格价位。
+2. status：是否已有由该网格买入形成的待卖仓位。
+3. volume：该格当前持有股数。
+4. cost_price：该格对应买入价。
+5. cost_amount / commission / slippage_cost：用于计算真实已实现盈亏。
+
+第三步：底仓和网格仓分开处理
+
+底仓可以作为独立持仓，不应该把当前价格以下所有网格都无条件标记为 OCCUPIED。
+
+可选方案：
+1. 底仓只影响账户总持仓和现金，不占用网格节点。
+2. 如果希望上涨时能卖底仓，则需要单独定义“底仓卖出规则”，不要混同为网格配对收益。
+
+第四步：修复买卖配对
+
+下跌跨过某格：
+如果该格没有未卖出的网格仓，则按该格价格买入。
+
+上涨跨过某格：
+只卖出此前在下方相邻格买入的仓位。
+
+例子：
+9.5 买入的仓位，应在价格回到 10.0 时卖出。
+毛利润应近似：
+(10.0 - 9.5) * volume - 手续费 - 滑点成本。
+
+第五步：重算指标
+
+需要至少明确：
+1. total_return：账户总收益率。
+2. max_drawdown：账户净值回撤。
+3. total_trades：是否继续表示流水数。
+4. win_rate：基于已完成网格轮次的胜率。
+
+建议额外内部统计：
+1. completed_cycles。
+2. realized_grid_profit。
+3. open_grid_positions。
+
+第六步：让测试脚本通过
+
+最小验收标准：
+backend/tests/grid_strategy_cases.py 中：
+1. test_geometric_percent_contract 通过。
+2. test_basic_grid_cycle_should_buy_low_and_sell_high 通过。
+
+之后再逐步补：
+1. 多格连续下跌买入。
+2. 多格连续上涨卖出。
+3. 手续费和滑点后的净利润。
+4. 资金不足时不买入。
+5. 持仓不足时不卖出。
+6. 底仓为 0 和底仓不为 0 的行为差异。

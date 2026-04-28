@@ -14,7 +14,7 @@ class SimulationRequest(BaseModel):
     strategy_params: Dict[str, Any] = Field(
         default_factory=dict, 
         description="策略扩展参数字典，透传给具体算法",
-        examples=[{"lower_bound": 20.0, "upper_bound": 30.0, "grid_step_pct": 0.05, "base_position_ratio": 0.5, "funds_per_grid": 10000.0}]
+        examples=[{"lower_bound": 20.0, "upper_bound": 30.0, "grid_step_pct": 5.0, "base_position_ratio": 0.5, "funds_per_grid": 10000.0}]
     )
 
 class EquitySnapshot(BaseModel):
