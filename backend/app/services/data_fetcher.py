@@ -2,6 +2,7 @@ import akshare as ak
 import polars as pl
 from datetime import datetime
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,10 @@ class DataFetcher:
         根据指定频率 (daily/5min/1min) 获取 A 股历史数据并转换为标准化的 Polars DataFrame。
         """
         logger.info(f"正在通过 AkShare 获取 [{symbol}] 的 [{frequency}] 级别数据 ({start_date} -- {end_date})...")
+
+        # ── 临时绕过系统代理，避免 akshare 走代理导致 ProxyError ──────────
+        _proxy_keys = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
+        _saved_proxies = {k: os.environ.pop(k, None) for k in _proxy_keys}
 
         try:
             if frequency == "daily":
@@ -71,3 +76,8 @@ class DataFetcher:
         except Exception as e:
             logger.error(f"获取股票 [{symbol}] 数据时发生异常: {str(e)}", exc_info=True)
             return None
+        finally:
+            # ── 恢复原始代理环境变量 ──────────────────────────────────────
+            for k, v in _saved_proxies.items():
+                if v is not None:
+                    os.environ[k] = v
