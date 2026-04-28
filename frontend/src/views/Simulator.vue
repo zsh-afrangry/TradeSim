@@ -597,25 +597,25 @@ const saveRecord = async () => {
         <el-row :gutter="20" class="stat-cards">
           <el-col :span="6">
             <el-card shadow="always" style="border-radius: 10px;">
-              <div class="stat-title">总收益率 (Total Return)</div>
+              <div class="stat-title">总收益率</div>
               <div class="stat-val" :style="{color: returnColor}">{{ formatPct(metrics.total_return) }}</div>
             </el-card>
           </el-col>
           <el-col :span="6">
             <el-card shadow="always" style="border-radius: 10px;">
-              <div class="stat-title">最大回撤 (Max Drawdown)</div>
+              <div class="stat-title">最大回撤</div>
               <div class="stat-val text-danger">{{ formatPct(metrics.max_drawdown) }}</div>
             </el-card>
           </el-col>
           <el-col :span="6">
             <el-card shadow="always" style="border-radius: 10px;">
-              <div class="stat-title">交易频次 (Trades)</div>
+              <div class="stat-title">交易频次</div>
               <div class="stat-val" style="color: #409EFF">{{ metrics.total_trades }} <span style="font-size: 14px">笔</span></div>
             </el-card>
           </el-col>
           <el-col :span="6">
             <el-card shadow="always" style="border-radius: 10px;">
-              <div class="stat-title">胜率 (Win Rate/Est)</div>
+              <div class="stat-title">胜率</div>
               <div class="stat-val" style="color: #E6A23C">{{ formatPct(metrics.win_rate) }}</div>
             </el-card>
           </el-col>

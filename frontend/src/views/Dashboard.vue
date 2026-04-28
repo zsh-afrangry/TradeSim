@@ -45,8 +45,7 @@ const formatPct = (val) => {
           <div style="display: flex; justify-content: space-between; align-items: center;">
             <div style="font-weight: bold; font-size: 18px; color: #303133;">
               <el-icon style="margin-right: 8px"><Trophy /></el-icon>
-              量化组合收藏家榜单 
-              <span style="font-size: 13px; font-weight: normal; color: #909399; margin-left:10px;">(数据直达 MySQL，按总收益率逆序速排)</span>
+              量化组合记录
             </div>
             <el-button @click="fetchList" plain type="info" :icon="'Refresh'" circle></el-button>
           </div>

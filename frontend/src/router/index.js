@@ -13,6 +13,11 @@ const routes = [
         component: Simulator
     },
     {
+        path: '/yearline',
+        name: 'YearLine',
+        component: () => import('../views/YearLineStrategy.vue')
+    },
+    {
         path: '/dashboard',
         name: 'Dashboard',
         component: Dashboard

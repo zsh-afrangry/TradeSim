@@ -1,38 +1,58 @@
 <template>
   <el-container class="app-container">
-    <el-header height="60px" class="header">
-      <div class="header-logo">📈</div>
-      <h2>TradeSim 智能回测系统</h2>
-      <div class="header-nav">
-        <router-link to="/simulate" custom v-slot="{ navigate, isActive }">
-          <el-button 
-            type="primary" 
-            :text="!isActive"
-            :class="{'nav-active': isActive}"
-            @click="navigate"
-          >
-            <el-icon><DataLine /></el-icon>
-            策略回测实验室
-          </el-button>
-        </router-link>
-        
-        <router-link to="/dashboard" custom v-slot="{ navigate, isActive }">
-          <el-button 
-            type="success"
-            :text="!isActive"
-            :class="{'nav-active': isActive}"
-            @click="navigate"
-          >
-            <el-icon><Star /></el-icon>
-            我的历史收藏库
-          </el-button>
-        </router-link>
+    <el-aside :width="isCollapsed ? '64px' : '200px'" class="sidebar">
+      <div class="sidebar-logo" @click="toggleCollapse">
+        <span class="logo-icon">📈</span>
+        <span v-if="!isCollapsed" class="logo-text">TradeSim</span>
       </div>
-    </el-header>
-    
-    <router-view></router-view>
+
+      <el-menu
+        :default-active="$route.path"
+        :collapse="isCollapsed"
+        :collapse-transition="true"
+        router
+        class="sidebar-menu"
+      >
+        <el-menu-item index="/simulate">
+          <el-icon><DataLine /></el-icon>
+          <template #title>网格回测</template>
+        </el-menu-item>
+
+        <el-menu-item index="/yearline">
+          <el-icon><TrendCharts /></el-icon>
+          <template #title>年线策略</template>
+        </el-menu-item>
+
+        <el-menu-item index="/dashboard">
+          <el-icon><Star /></el-icon>
+          <template #title>收藏库</template>
+        </el-menu-item>
+      </el-menu>
+
+      <div class="sidebar-collapse-btn" @click="toggleCollapse">
+        <el-icon>
+          <ArrowLeft v-if="!isCollapsed" />
+          <ArrowRight v-else />
+        </el-icon>
+      </div>
+    </el-aside>
+
+    <el-main class="main-content">
+      <router-view></router-view>
+    </el-main>
   </el-container>
 </template>
+
+<script setup>
+import { ref } from 'vue'
+import { DataLine, Star, ArrowLeft, ArrowRight, TrendCharts } from '@element-plus/icons-vue'
+
+const isCollapsed = ref(false)
+
+function toggleCollapse() {
+  isCollapsed.value = !isCollapsed.value
+}
+</script>
 
 <style>
 html, body {
@@ -45,32 +65,75 @@ html, body {
 #app {
   height: 100vh;
 }
+</style>
+
+<style scoped>
 .app-container {
-  height: 100%;
+  height: 100vh;
 }
-.header {
+
+.sidebar {
   background-color: #2c3e50;
-  color: #fff;
+  display: flex;
+  flex-direction: column;
+  transition: width 0.3s;
+  overflow: hidden;
+}
+
+.sidebar-logo {
+  height: 60px;
   display: flex;
   align-items: center;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
-  z-index: 10;
+  padding: 0 20px;
+  cursor: pointer;
+  color: #fff;
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+  white-space: nowrap;
+  overflow: hidden;
 }
-.header-logo {
-  font-size: 28px;
-  margin-right: 15px;
+
+.logo-icon {
+  font-size: 24px;
+  flex-shrink: 0;
 }
-.header h2 {
-  margin: 0;
-  font-weight: 500;
+
+.logo-text {
+  margin-left: 10px;
+  font-size: 16px;
+  font-weight: 600;
   letter-spacing: 1px;
 }
-.header-nav {
-  margin-left: auto; /* 推到最右侧 */
-  display: flex;
-  gap: 15px;
+
+.sidebar-menu {
+  flex: 1;
+  border-right: none;
+  background-color: #2c3e50;
+  --el-menu-bg-color: #2c3e50;
+  --el-menu-text-color: #bdc3c7;
+  --el-menu-active-color: #fff;
+  --el-menu-hover-bg-color: #34495e;
+  --el-menu-item-height: 52px;
 }
-.nav-active {
-  font-weight: bold;
+
+.sidebar-collapse-btn {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #bdc3c7;
+  cursor: pointer;
+  border-top: 1px solid rgba(255,255,255,0.1);
+  transition: background-color 0.2s;
+}
+
+.sidebar-collapse-btn:hover {
+  background-color: #34495e;
+  color: #fff;
+}
+
+.main-content {
+  padding: 0;
+  overflow: auto;
+  background-color: #f0f2f5;
 }
 </style>
